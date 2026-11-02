@@ -190,6 +190,17 @@ $("#rememberKey").addEventListener("change", e=>{ if(!e.target.checked) store.de
 $("#apikey").addEventListener("change", ()=>{ if($("#rememberKey").checked) store.set("cuest_key",$("#apikey").value.trim()); });
 $("#model").addEventListener("change", e=>store.set("cuest_model", e.target.value));
 
+// Ordena modelos: versión más nueva primero; Flash antes que Pro; sin lite/exp al final.
+function modelScore(name){
+  const n=name.replace("models/",""), v=(n.match(/gemini-(\d+(?:\.\d+)?)/i)||[])[1];
+  let s=(v?parseFloat(v):0)*100;
+  if(/flash/i.test(n)) s+=20; if(/pro/i.test(n)) s+=10;
+  if(/lite|exp|thinking|customtools/i.test(n)) s-=30;
+  if(/latest/i.test(n)) s-=5;
+  return s;
+}
+function badModels(){ return store.get("cuest_bad_models",[]); }
+function markBad(m){ const b=badModels(); if(!b.includes(m)){ b.push(m); store.set("cuest_bad_models",b); } }
 async function loadModels(){
   const key = $("#apikey").value.trim();
   if(!key){ alertBox("Pega primero tu API key."); return; }
@@ -199,11 +210,11 @@ async function loadModels(){
     const j = await r.json();
     if(!r.ok) throw new Error(j.error?.message || r.status);
     const models = (j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes("generateContent") && /gemini/i.test(m.name) && !/(tts|image|embedding|audio|live)/i.test(m.name));
+    models.sort((a,b)=>modelScore(b.name)-modelScore(a.name));
     const sel = $("#model"); sel.innerHTML = "";
     models.forEach(m=>{ const o=document.createElement("option"); o.value=m.name.replace("models/",""); o.textContent=(m.displayName||m.name)+" ("+o.value+")"; sel.appendChild(o); });
-    const pick = models.map(m=>m.name.replace("models/","")).find(n=>n===savedModel)
-      || models.map(m=>m.name.replace("models/","")).find(n=>/flash/i.test(n) && !/lite|preview|exp/i.test(n))
-      || (models[0] && models[0].name.replace("models/",""));
+    const names = models.map(m=>m.name.replace("models/",""));
+    const pick = names.find(n=>n===savedModel && !badModels().includes(n)) || names.find(n=>!badModels().includes(n)) || names[0];
     if(pick) sel.value = pick;
     store.set("cuest_model", sel.value);
     setStatus(`✅ ${models.length} modelos disponibles.`);
@@ -291,10 +302,22 @@ $("#readBtn").addEventListener("click", async ()=>{
       contents:[{role:"user",parts:[{text:buildPrompt()},...images.map(im=>({inline_data:{mime_type:im.mime,data:im.base64}}))]}],
       generationConfig:{temperature:0,responseMimeType:"application/json",responseSchema:buildSchema()}
     };
-    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
-      method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)});
-    const j=await r.json();
-    if(!r.ok) throw new Error(j.error?.message || ("HTTP "+r.status));
+    let j, used=model;
+    for(let attempt=0; attempt<4; attempt++){
+      setStatus(`<span class="spinner"></span>Leyendo ${images.length} foto(s) con ${escapeHtml(used)}…`);
+      const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(used)}:generateContent`,{
+        method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)});
+      j=await r.json();
+      if(r.ok) break;
+      const msg=j.error?.message || ("HTTP "+r.status);
+      const sel=$("#model"), opts=[...sel.options].map(o=>o.value);
+      if(/no longer available|not found|not supported|deprecated|retired/i.test(msg)){
+        markBad(used);
+        const next=opts.find(o=>o!==used && !badModels().includes(o));
+        if(next){ used=next; sel.value=next; store.set("cuest_model",next); continue; }
+      }
+      throw new Error(msg);
+    }
     const txt=(j.candidates?.[0]?.content?.parts||[]).map(p=>p.text||"").join("");
     if(!txt) throw new Error("La respuesta llegó vacía (" + (j.candidates?.[0]?.finishReason||"sin motivo") + ").");
     const data=JSON.parse(txt);
