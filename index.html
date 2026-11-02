@@ -191,8 +191,11 @@ $("#apikey").addEventListener("change", ()=>{ if($("#rememberKey").checked) stor
 $("#model").addEventListener("change", e=>store.set("cuest_model", e.target.value));
 
 // Ordena modelos: versión más nueva primero; Flash antes que Pro; sin lite/exp al final.
+// Probados con este formulario (nov 2026): responden rápido y con el formato correcto.
+const PREFERRED=["gemini-3-flash-preview","gemini-3.5-flash","gemini-3.1-pro-preview"];
 function modelScore(name){
   const n=name.replace("models/",""), v=(n.match(/gemini-(\d+(?:\.\d+)?)/i)||[])[1];
+  const pi=PREFERRED.indexOf(n); if(pi>=0) return 100000-pi*10;
   let s=(v?parseFloat(v):0)*100;
   if(/flash/i.test(n)) s+=20; if(/pro/i.test(n)) s+=10;
   if(/lite|exp|thinking|customtools/i.test(n)) s-=30;
@@ -209,7 +212,7 @@ async function loadModels(){
     const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",{headers:{"x-goog-api-key":key}});
     const j = await r.json();
     if(!r.ok) throw new Error(j.error?.message || r.status);
-    const models = (j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes("generateContent") && /gemini/i.test(m.name) && !/(tts|image|embedding|audio|live)/i.test(m.name));
+    const models = (j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes("generateContent") && /^models\/gemini-\d/i.test(m.name) && !/(tts|image|embedding|audio|live|robotics|computer-use|transcribe|customtools|banana|omni|argon)/i.test(m.name));
     models.sort((a,b)=>modelScore(b.name)-modelScore(a.name));
     const sel = $("#model"); sel.innerHTML = "";
     models.forEach(m=>{ const o=document.createElement("option"); o.value=m.name.replace("models/",""); o.textContent=(m.displayName||m.name)+" ("+o.value+")"; sel.appendChild(o); });
@@ -302,18 +305,24 @@ $("#readBtn").addEventListener("click", async ()=>{
       contents:[{role:"user",parts:[{text:buildPrompt()},...images.map(im=>({inline_data:{mime_type:im.mime,data:im.base64}}))]}],
       generationConfig:{temperature:0,responseMimeType:"application/json",responseSchema:buildSchema()}
     };
-    let j, used=model;
+    let j, used=model; const tried=[];
     for(let attempt=0; attempt<4; attempt++){
       setStatus(`<span class="spinner"></span>Leyendo ${images.length} foto(s) con ${escapeHtml(used)}…`);
-      const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(used)}:generateContent`,{
-        method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)});
-      j=await r.json();
-      if(r.ok) break;
-      const msg=j.error?.message || ("HTTP "+r.status);
+      const ctrl=new AbortController(), timer=setTimeout(()=>ctrl.abort(),90000);
+      let r, msg="";
+      try{
+        r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(used)}:generateContent`,{
+          method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body),signal:ctrl.signal});
+        j=await r.json();
+        if(r.ok) break;
+        msg=j.error?.message || ("HTTP "+r.status);
+      }catch(err){ msg = err.name==="AbortError" ? "timeout: el modelo tardó más de 90 s" : err.message; }
+      finally{ clearTimeout(timer); }
       const sel=$("#model"), opts=[...sel.options].map(o=>o.value);
-      if(/no longer available|not found|not supported|deprecated|retired/i.test(msg)){
-        markBad(used);
-        const next=opts.find(o=>o!==used && !badModels().includes(o));
+      if(/no longer available|not found|not supported|deprecated|retired|timeout|quota|exhausted|overloaded|unavailable|internal/i.test(msg) || (r && r.status>=500)){
+        tried.push(used);
+        if(/no longer available|not found|not supported|deprecated|retired/i.test(msg)) markBad(used);
+        const next=opts.find(o=>!tried.includes(o) && !badModels().includes(o));
         if(next){ used=next; sel.value=next; store.set("cuest_model",next); continue; }
       }
       throw new Error(msg);
