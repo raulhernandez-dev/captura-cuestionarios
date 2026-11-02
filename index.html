@@ -141,6 +141,425 @@
 </main>
 <script>
 // ---------- Definición del cuestionario (mismo orden que Google Forms) ----------
+const HEADERS = ["Iniciales","Edad ","Sexo","¿Cuánto pesas?","¿Cuánto mides?","IMC","Nivel escolar","Promedio","Edad de tu mamá","Edad de tu papá","A continuación, verás una serie de 9 imágenes que representan distintas formas y tamaños de cuerpo\nElige el número de la silueta que más se parece a tu cuerpo actualmente.","Elige  el número de la silueta que representa cómo te gustaría verte.","  Me siento una persona tan valiosa como las otras  ","Generalmente me inclino a pensar que soy un fracaso ","  Creo que tengo algunas cualidades buenas","Soy capaz de hacer las cosas tan bien como los demás ","Creo que no tengo mucho de lo que estar orgulloso","Tengo una actitud positiva hacia mí mismo  ","En general me siento satisfecho conmigo mismo","Me gustaría tener más respeto por mí mismo","Realmente me siento inútil en algunas ocasiones ","Me interesan las cosas tanto como antes","Duermo bien","Me dan ganas de llorar","Me gusta salir con mis amigos","Me gustaría escapar, salir corriendo","Me duele la panza","Tengo mucha energía ","Disfruto la comida","Puedo defenderme por mí mismo (a)","Creo que no vale la pena vivir","Soy bueno (a) para las cosas que hago","Disfruto lo que hago tanto como lo hacía antes","Me gusta hablar con mi familia ","Tengo sueños horribles","Me siento muy solo (a)","Me animo fácilmente","Me siento tan triste que me cuesta trabajo soportarlo","Me siento muy aburrido","¿Te has sentido bien y en forma?","¿Te has sentido lleno/a de energía? ","¿Te has sentido triste? ","¿Te has sentido solo/a? ","¿Has tenido suficiente tiempo para ti? ","¿Has podido hacer las cosas que querías en tu tiempo libre? ","¿Tus padres te han tratado de forma justa? ","¿Te has divertido con tus amigos/as? ","¿Te ha ido bien en la escuela? ","¿Has podido poner atención? ","En general, ¿cómo dirías que es tu salud?","A veces pienso que no sirvo para nada"];
+
+const O = {
+  sexo:["Femenino","Masculino"],
+  nivel:["Primaria","Secundaria","Preparatoria"],
+  ros:["Muy de acuerdo","De acuerdo","En desacuerdo","Muy en desacuerdo"],
+  bir:["Siempre","Algunas veces","Nunca"],
+  kf:["Nunca","Casi nunca","Algunas veces","Casi siempre","Siempre"],
+  ki:["Nada","Un poco","Moderadamente","Mucho","Muchísimo"],
+  salud:["Excelente","Muy buena","Buena","Regular","Mala"],
+  sil:["1","2","3","4","5","6","7","8","9"]
+};
+// tipo: text | num | opt ; grupo para mostrar
+const FIELDS = [];
+function F(idx, label, type, opts, group){ FIELDS.push({key:"f"+idx, idx, label, type, opts, group}); }
+F(0,"Iniciales (solo iniciales)","text",null,"gen"); F(1,"Edad (años)","num",null,"gen"); F(2,"Sexo","opt",O.sexo,"gen");
+F(3,"Peso (kg)","num",null,"gen"); F(4,"Talla (m)","num",null,"gen"); F(6,"Nivel escolar","opt",O.nivel,"gen");
+F(7,"Promedio","text",null,"gen"); F(8,"Edad de la mamá","text",null,"gen"); F(9,"Edad del papá","text",null,"gen");
+F(10,"Silueta actual (cómo me veo)","opt",O.sil,"st"); F(11,"Silueta ideal (cómo me gustaría verme)","opt",O.sil,"st");
+for(let i=12;i<=20;i++) F(i,`${i-11}. ${HEADERS[i].trim()}`,"opt",O.ros,"ro");
+F(50,"10. A veces pienso que no sirvo para nada","opt",O.ros,"ro");
+for(let i=21;i<=38;i++) F(i,`${i-20}. ${HEADERS[i].trim()}`,"opt",O.bir,"bi");
+for(let i=39;i<=48;i++) F(i,`${i-38}. ${HEADERS[i].trim()}`,"opt",(i===39||i===47)?O.ki:O.kf,"ki");
+F(49,"En general, ¿cómo dirías que es tu salud?","opt",O.salud,"ki");
+FIELDS.sort((a,b)=>(a.idx===50?20.5:a.idx)-(b.idx===50?20.5:b.idx));
+const GROUPS = {gen:["Datos generales","--gen"],st:["Stunkard · siluetas","--st"],ro:["Rosenberg · autoestima","--ro"],bi:["Birleson · estado de ánimo","--bi"],ki:["KIDSCREEN-10 · calidad de vida","--ki"]};
+
+// ---------- utilidades ----------
+const $ = s => document.querySelector(s);
+const store = {
+  get(k,d){ try{ const v=localStorage.getItem(k); return v===null?d:JSON.parse(v);}catch(e){return d;} },
+  set(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); return true;}catch(e){ return false; } },
+  del(k){ try{ localStorage.removeItem(k);}catch(e){} }
+};
+let records = store.get("cuest_records", []);
+let images = [];      // {dataUrl, base64, mime}
+let editing = null;   // índice del registro en edición o null
+let current = {};     // valores del formulario en revisión
+
+function setStatus(html){ $("#status").innerHTML = html; }
+
+// ---------- configuración ----------
+const savedKey = store.get("cuest_key", "");
+if(savedKey){ $("#apikey").value = savedKey; $("#rememberKey").checked = true; }
+const savedModel = store.get("cuest_model","");
+$("#rememberKey").addEventListener("change", e=>{ if(!e.target.checked) store.del("cuest_key"); else store.set("cuest_key",$("#apikey").value.trim()); });
+$("#apikey").addEventListener("change", ()=>{ if($("#rememberKey").checked) store.set("cuest_key",$("#apikey").value.trim()); });
+$("#model").addEventListener("change", e=>store.set("cuest_model", e.target.value));
+
+async function loadModels(){
+  const key = $("#apikey").value.trim();
+  if(!key){ alertBox("Pega primero tu API key."); return; }
+  $("#loadModels").disabled = true; $("#loadModels").textContent = "Cargando…";
+  try{
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",{headers:{"x-goog-api-key":key}});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error?.message || r.status);
+    const models = (j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes("generateContent") && /gemini/i.test(m.name) && !/(tts|image|embedding|audio|live)/i.test(m.name));
+    const sel = $("#model"); sel.innerHTML = "";
+    models.forEach(m=>{ const o=document.createElement("option"); o.value=m.name.replace("models/",""); o.textContent=(m.displayName||m.name)+" ("+o.value+")"; sel.appendChild(o); });
+    const pick = models.map(m=>m.name.replace("models/","")).find(n=>n===savedModel)
+      || models.map(m=>m.name.replace("models/","")).find(n=>/flash/i.test(n) && !/lite|preview|exp/i.test(n))
+      || (models[0] && models[0].name.replace("models/",""));
+    if(pick) sel.value = pick;
+    store.set("cuest_model", sel.value);
+    setStatus(`✅ ${models.length} modelos disponibles.`);
+  }catch(e){ setStatus(`<span style="color:var(--danger)">No se pudieron cargar los modelos: ${escapeHtml(e.message)}</span>`); }
+  finally{ $("#loadModels").disabled=false; $("#loadModels").textContent="Cargar modelos"; refreshButtons(); }
+}
+$("#loadModels").addEventListener("click", loadModels);
+if(savedKey) loadModels();
+
+function alertBox(msg){ setStatus(`<span style="color:var(--danger)">${escapeHtml(msg)}</span>`); }
+function escapeHtml(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+// ---------- fotos ----------
+const drop = $("#drop");
+drop.addEventListener("click", ()=>$("#file").click());
+drop.addEventListener("dragover", e=>{e.preventDefault(); drop.classList.add("over");});
+drop.addEventListener("dragleave", ()=>drop.classList.remove("over"));
+drop.addEventListener("drop", e=>{e.preventDefault(); drop.classList.remove("over"); addFiles(e.dataTransfer.files);});
+$("#file").addEventListener("change", e=>{ addFiles(e.target.files); e.target.value=""; });
+
+async function addFiles(list){
+  for(const f of list){ if(!f.type.startsWith("image/")) continue; images.push(await shrink(f)); }
+  renderThumbs(); refreshButtons();
+}
+function shrink(file){  // reduce a máx. 2000 px para enviar menos datos
+  return new Promise((res,rej)=>{
+    const img = new Image(); const url = URL.createObjectURL(file);
+    img.onload = ()=>{
+      const max=2000, k=Math.min(1, max/Math.max(img.width,img.height));
+      const c=document.createElement("canvas"); c.width=Math.round(img.width*k); c.height=Math.round(img.height*k);
+      c.getContext("2d").drawImage(img,0,0,c.width,c.height);
+      const dataUrl=c.toDataURL("image/jpeg",0.88); URL.revokeObjectURL(url);
+      res({dataUrl, base64:dataUrl.split(",")[1], mime:"image/jpeg"});
+    };
+    img.onerror = rej; img.src = url;
+  });
+}
+function renderThumbs(){
+  const t=$("#thumbs"); t.innerHTML="";
+  images.forEach((im,i)=>{
+    const d=document.createElement("div"); d.className="thumb";
+    d.innerHTML=`<img src="${im.dataUrl}" alt="Página ${i+1}"><button title="Quitar">×</button>`;
+    d.querySelector("button").onclick=()=>{ images.splice(i,1); renderThumbs(); refreshButtons(); };
+    t.appendChild(d);
+  });
+}
+function refreshButtons(){ $("#readBtn").disabled = !(images.length && $("#apikey").value.trim() && $("#model").value); }
+$("#apikey").addEventListener("input", refreshButtons);
+
+// ---------- lectura con Gemini ----------
+function buildSchema(){
+  const props={};
+  FIELDS.forEach(f=>{
+    if(f.type==="num") props[f.key]={type:"NUMBER",nullable:true,description:f.label};
+    else if(f.type==="opt") props[f.key]={type:"STRING",nullable:true,enum:f.opts,description:f.label};
+    else props[f.key]={type:"STRING",nullable:true,description:f.label};
+  });
+  props.notas={type:"STRING",nullable:true,description:"Observaciones breves sobre respuestas dudosas"};
+  return {type:"OBJECT",properties:props,required:FIELDS.map(f=>f.key)};
+}
+function buildPrompt(){
+  const lines = FIELDS.map(f=>`- ${f.key}: ${f.label}${f.opts?` [opciones: ${f.opts.join(" | ")}]`:""}`).join("\n");
+  return `Eres un capturista de datos de investigación. Las imágenes son las páginas en papel de UN solo participante que contestó un cuestionario (datos generales, siluetas de Stunkard, escala de Rosenberg, Birleson y KIDSCREEN-10).
+
+Transcribe EXACTAMENTE lo que el participante marcó o escribió. Las fotos pueden venir en cualquier orden, inclinadas o con sombras. Reglas estrictas:
+1. Si una pregunta no tiene marca, tiene más de una opción marcada, está borrosa o no estás seguro, devuelve null. NUNCA adivines ni completes con la respuesta "más probable".
+2. Para preguntas de opción, devuelve solo una de las opciones listadas, tal cual.
+3. Iniciales: devuelve SOLO las iniciales en mayúsculas, aunque haya escrito su nombre completo (ej. "Ana López Díaz" → "ALD"). Nunca devuelvas el nombre completo.
+4. Sexo: "F", "Femenino" o "Mujer" → Femenino; "H", "Hombre" o "Masculino" → Masculino. Si solo escribió "M" (puede ser Mujer o Masculino) devuelve null y anótalo en notas.
+5. Nivel escolar: la opción marcada con X o línea. Peso en kilogramos y talla en metros (si escribió 164 cm, devuelve 1.64).
+6. Siluetas (Stunkard): hay dos recuadros con figuras numeradas del 1 al 9; el de la izquierda es la silueta actual y el de la derecha la ideal. Devuelve el número circulado o marcado en cada uno; si un recuadro no tiene marca clara, null.
+7. Rosenberg: tabla de 10 frases con columnas Muy en desacuerdo (1), En desacuerdo (2), De acuerdo (3), Muy de acuerdo (4); toma la columna marcada con X. La frase 10 es «A veces pienso que no sirvo para nada» (campo f50).
+8. Birleson: 18 frases con columnas Siempre / Algunas veces / Nunca marcadas con X.
+9. KIDSCREEN-10: 10 preguntas con círculos tachados o rellenos; los encabezados de cada fila cambian (Nada…Muchísimo o Nunca…Siempre). Luego la pregunta de salud general.
+10. En "notas" menciona brevemente cualquier respuesta dudosa, tachada o corregida.
+
+Campos:
+${lines}`;
+}
+$("#readBtn").addEventListener("click", async ()=>{
+  const key=$("#apikey").value.trim(), model=$("#model").value;
+  $("#readBtn").disabled=true; setStatus(`<span class="spinner"></span>Leyendo ${images.length} foto(s) con ${escapeHtml(model)}…`);
+  try{
+    const body={
+      contents:[{role:"user",parts:[{text:buildPrompt()},...images.map(im=>({inline_data:{mime_type:im.mime,data:im.base64}}))]}],
+      generationConfig:{temperature:0,responseMimeType:"application/json",responseSchema:buildSchema()}
+    };
+    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
+      method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!r.ok) throw new Error(j.error?.message || ("HTTP "+r.status));
+    const txt=(j.candidates?.[0]?.content?.parts||[]).map(p=>p.text||"").join("");
+    if(!txt) throw new Error("La respuesta llegó vacía (" + (j.candidates?.[0]?.finishReason||"sin motivo") + ").");
+    const data=JSON.parse(txt);
+    const vals={}; FIELDS.forEach(f=>vals[f.key]=sanitize(f,data[f.key]));
+    vals.notas=data.notas||"";
+    openReview(vals, images.slice(), null);
+    setStatus("✅ Listo. Revisa los campos en amarillo.");
+  }catch(e){ setStatus(`<span style="color:var(--danger)">Error al leer: ${escapeHtml(e.message)}</span>`); }
+  finally{ refreshButtons(); }
+});
+function sanitize(f,v){
+  if(v===undefined||v===null||v==="") return null;
+  if(f.type==="num"){ const n=parseFloat(String(v).replace(",",".").replace(/[^\d.]/g,"")); if(isNaN(n)) return null;
+    if(f.idx===4 && n>3) return +(n/100).toFixed(2); return n; }
+  if(f.type==="opt"){ const s=String(v).trim(); return f.opts.includes(s)?s:null; }
+  return String(v).trim();
+}
+$("#manualBtn").addEventListener("click", ()=>{ const v={}; FIELDS.forEach(f=>v[f.key]=null); v.notas=""; openReview(v, images.slice(), null); });
+
+// ---------- revisión ----------
+let reviewImages=[];
+function openReview(vals, imgs, idx){
+  current={...vals}; reviewImages=imgs; editing=idx;
+  const form=$("#form"); form.innerHTML="";
+  Object.entries(GROUPS).forEach(([g,[title,color]])=>{
+    const fs=document.createElement("fieldset");
+    fs.innerHTML=`<legend style="background:var(${color})">${title}</legend><div class="grid"></div>`;
+    const grid=fs.querySelector(".grid");
+    FIELDS.filter(f=>f.group===g).forEach(f=>{
+      const d=document.createElement("div"); d.className="field"; d.dataset.key=f.key;
+      let input;
+      if(f.type==="opt"){ input=`<select name="${f.key}"><option value="">— sin dato —</option>${f.opts.map(o=>`<option${current[f.key]===o?" selected":""}>${o}</option>`).join("")}</select>`; }
+      else input=`<input name="${f.key}" ${f.type==="num"?'inputmode="decimal"':""} value="${escapeHtml(current[f.key]??"")}">`;
+      d.innerHTML=`<label>${escapeHtml(f.label)}</label>${input}`;
+      grid.appendChild(d);
+    });
+    form.appendChild(fs);
+  });
+  const nd=document.createElement("div"); nd.className="field";
+  nd.innerHTML=`<label>Notas de la lectura</label><textarea name="notas" rows="2">${escapeHtml(current.notas||"")}</textarea>`;
+  form.appendChild(nd);
+  form.oninput=e=>{ const f=FIELDS.find(x=>x.key===e.target.name);
+    current[e.target.name] = f ? sanitize(f, e.target.value) : e.target.value; markPending(); };
+  // visor
+  const tabs=$("#viewerTabs"); tabs.innerHTML="";
+  if(reviewImages.length){
+    $("#viewer").classList.remove("hidden");
+    reviewImages.forEach((im,i)=>{ const b=document.createElement("button"); b.type="button"; b.textContent="Página "+(i+1);
+      b.onclick=()=>showPage(i); tabs.appendChild(b); });
+    showPage(0);
+  } else $("#viewer").classList.add("hidden");
+  $("#reviewCard").classList.remove("hidden"); markPending();
+  $("#reviewCard").scrollIntoView({behavior:"smooth"});
+}
+function showPage(i){ $("#viewerImg").src=reviewImages[i].dataUrl; [...$("#viewerTabs").children].forEach((b,j)=>b.classList.toggle("on",i===j)); }
+$("#viewerImg").addEventListener("click", e=>e.target.classList.toggle("zoom"));
+function pendingCount(v){ return FIELDS.filter(f=>v[f.key]===null||v[f.key]===undefined||v[f.key]==="").length; }
+function markPending(){
+  document.querySelectorAll("#form .field[data-key]").forEach(d=>{ const v=current[d.dataset.key]; d.classList.toggle("pending", v===null||v===undefined||v===""); });
+  const n=pendingCount(current), p=$("#pendingPill");
+  p.className="pill "+(n?"warn":"ok"); p.textContent = n? `${n} campo(s) sin dato` : "Todo capturado";
+}
+$("#saveBtn").addEventListener("click", ()=>{
+  const n=pendingCount(current);
+  if(n && !confirm(`Quedan ${n} campo(s) sin dato. Se guardarán vacíos. ¿Continuar?`)) return;
+  const rec={values:{...current}, savedAt:new Date().toISOString()};
+  if(editing===null) records.push(rec); else records[editing]=rec;
+  if(!store.set("cuest_records",records)) alertBox("No se pudo guardar en el navegador. Descarga un respaldo JSON ahora.");
+  closeReview(); images=[]; renderThumbs(); refreshButtons(); renderTable();
+  setStatus(`💾 Participante guardado (${records.length} en total). Sube las fotos del siguiente.`);
+  window.scrollTo({top:$("#drop").offsetTop-20,behavior:"smooth"});
+});
+$("#cancelBtn").addEventListener("click", ()=>{ if(confirm("¿Descartar esta captura?")) closeReview(); });
+function closeReview(){ $("#reviewCard").classList.add("hidden"); editing=null; current={}; reviewImages=[]; }
+
+// ---------- tabla y exportación ----------
+function renderTable(){
+  const tb=$("#table tbody"); tb.innerHTML="";
+  records.forEach((r,i)=>{
+    const v=r.values, n=pendingCount(v), tr=document.createElement("tr");
+    tr.innerHTML=`<td>${i+1}</td><td>${escapeHtml(v.f0??"")}</td><td>${v.f1??""}</td><td>${escapeHtml(v.f2??"")}</td><td>${v.f3??""}</td><td>${v.f4??""}</td>
+      <td>${n?`<span class="pill warn">${n}</span>`:'<span class="pill ok">0</span>'}</td>
+      <td><button data-e="${i}">Editar</button> <button class="danger" data-d="${i}">Eliminar</button></td>`;
+    tb.appendChild(tr);
+  });
+  tb.querySelectorAll("[data-e]").forEach(b=>b.onclick=()=>openReview(records[+b.dataset.e].values,[],+b.dataset.e));
+  tb.querySelectorAll("[data-d]").forEach(b=>b.onclick=()=>{ if(confirm("¿Eliminar este participante?")){ records.splice(+b.dataset.d,1); store.set("cuest_records",records); renderTable(); }});
+  $("#count").textContent=records.length;
+}
+function rowOf(v){ return HEADERS.map((h,idx)=>{ if(idx===5) return ""; const x=v["f"+idx]; return x===null||x===undefined?"":x; }); }
+function cellTsv(x){ return String(x).replace(/[\t\r\n]+/g," "); }
+function cellCsv(x){ const s=String(x); return /[",\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }
+$("#copyBtn").addEventListener("click", async ()=>{
+  if(!records.length) return alertBox("Aún no hay participantes.");
+  const tsv=records.map(r=>rowOf(r.values).map(cellTsv).join("\t")).join("\n");
+  try{ await navigator.clipboard.writeText(tsv); setStatus(`📋 ${records.length} fila(s) copiadas. Pega en la columna A de «Respuestas de formulario 1».`); }
+  catch(e){ const t=document.createElement("textarea"); t.value=tsv; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); setStatus("📋 Filas copiadas."); }
+});
+function download(name,content,type){ const b=new Blob([content],{type}); const a=document.createElement("a"); a.href=URL.createObjectURL(b); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }
+$("#csvBtn").addEventListener("click", ()=>{
+  if(!records.length) return alertBox("Aún no hay participantes.");
+  const csv=[HEADERS.map(cellCsv).join(","),...records.map(r=>rowOf(r.values).map(cellCsv).join(","))].join("\r\n");
+  download("captura_cuestionarios.csv","\uFEFF"+csv,"text/csv;charset=utf-8");
+});
+$("#jsonBtn").addEventListener("click", ()=>download("respaldo_captura.json",JSON.stringify(records,null,1),"application/json"));
+$("#importBtn").addEventListener("click", ()=>$("#importFile").click());
+$("#importFile").addEventListener("change", async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  try{ const arr=JSON.parse(await f.text()); if(!Array.isArray(arr)) throw new Error("formato");
+    if(records.length && !confirm(`Se agregarán ${arr.length} registro(s) a los ${records.length} actuales. ¿Continuar?`)) return;
+    records=records.concat(arr); store.set("cuest_records",records); renderTable(); setStatus(`✅ ${arr.length} registro(s) restaurados.`);
+  }catch(err){ alertBox("El archivo no es un respaldo válido."); }
+  e.target.value="";
+});
+$("#clearBtn").addEventListener("click", ()=>{
+  if(!records.length) return;
+  if(confirm(`¿Borrar los ${records.length} participantes capturados? Descarga antes un respaldo si lo necesitas.`)){ records=[]; store.set("cuest_records",records); renderTable(); }
+});
+renderTable();
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Captura de cuestionarios · Imagen corporal en adolescentes</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb;
+    --accent:#1d4ed8; --accent-soft:#e0e7ff; --warn:#fff3c4; --warn-line:#e0b400;
+    --ok:#dcfce7; --danger:#b91c1c;
+    --st:#0f766e; --ro:#6d28d9; --bi:#9a6700; --ki:#1d4ed8; --gen:#334155;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink);font-size:15px}
+  header{background:#172554;color:#fff;padding:18px 24px}
+  header h1{margin:0;font-size:20px}
+  header p{margin:4px 0 0;opacity:.8;font-size:13px}
+  main{max-width:1400px;margin:0 auto;padding:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:16px}
+  .card h2{margin:0 0 12px;font-size:16px;display:flex;align-items:center;gap:8px}
+  .step{display:inline-grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-size:13px}
+  label{font-size:13px;color:var(--muted);display:block;margin-bottom:4px}
+  input,select,textarea{font:inherit;padding:7px 9px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;width:100%}
+  button{font:inherit;padding:8px 14px;border-radius:6px;border:1px solid #cbd5e1;background:#fff;cursor:pointer}
+  button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  button.danger{color:var(--danger)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+  .row > div{flex:1;min-width:180px}
+  .note{font-size:12.5px;color:var(--muted);margin-top:8px}
+  .privacy{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;font-size:13px;margin-top:10px}
+  #drop{border:2px dashed #94a3b8;border-radius:10px;padding:22px;text-align:center;color:var(--muted);cursor:pointer}
+  #drop.over{border-color:var(--accent);background:var(--accent-soft)}
+  .thumbs{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+  .thumb{position:relative}
+  .thumb img{height:110px;border-radius:6px;border:1px solid var(--line)}
+  .thumb button{position:absolute;top:4px;right:4px;padding:0 7px;font-size:13px}
+  #status{margin-top:10px;font-size:14px}
+  .review{display:grid;grid-template-columns:minmax(300px,42%) 1fr;gap:16px}
+  @media (max-width:900px){.review{grid-template-columns:1fr}}
+  .viewer{position:sticky;top:10px;align-self:start;max-height:calc(100vh - 20px);overflow:auto;border:1px solid var(--line);border-radius:8px;background:#0f172a}
+  .viewer img{width:100%;display:block;cursor:zoom-in}
+  .viewer img.zoom{width:200%;cursor:zoom-out}
+  .viewer .tabs{display:flex;gap:4px;padding:6px;background:#1e293b;position:sticky;top:0}
+  .viewer .tabs button{padding:3px 10px;font-size:12px;background:#334155;color:#fff;border:none}
+  .viewer .tabs button.on{background:var(--accent)}
+  fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 14px;padding:10px 12px 4px}
+  legend{font-weight:600;font-size:14px;padding:2px 10px;border-radius:5px;color:#fff}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px 14px}
+  .field{padding:6px;border-radius:6px}
+  .field.pending{background:var(--warn);outline:1px solid var(--warn-line)}
+  .field label{color:var(--ink);font-size:13px}
+  .field label small{color:var(--muted)}
+  .summary{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+  .pill{padding:3px 10px;border-radius:999px;font-size:13px}
+  .pill.warn{background:var(--warn);border:1px solid var(--warn-line)}
+  .pill.ok{background:var(--ok)}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left}
+  th{background:#f1f5f9;font-weight:600}
+  .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .hidden{display:none}
+  .spinner{display:inline-block;width:14px;height:14px;border:2px solid #cbd5e1;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:6px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Captura de cuestionarios en papel</h1>
+  <p>Imagen corporal, autoestima, depresión y calidad de vida en adolescentes · Stunkard · Rosenberg · Birleson · KIDSCREEN-10</p>
+</header>
+<main>
+
+<section class="card">
+  <h2><span class="step">1</span> Configuración</h2>
+  <div class="row">
+    <div style="flex:2">
+      <label for="apikey">API key de Gemini (Google AI Studio)</label>
+      <input id="apikey" type="password" placeholder="Pega aquí tu API key" autocomplete="off">
+    </div>
+    <div>
+      <label for="model">Modelo</label>
+      <select id="model"><option value="">— primero carga los modelos —</option></select>
+    </div>
+    <div style="flex:0 0 auto">
+      <button id="loadModels">Cargar modelos</button>
+    </div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div><label><input type="checkbox" id="rememberKey" style="width:auto"> Recordar la key en este navegador</label></div>
+  </div>
+  <p class="note">La key nunca se guarda en el código ni en GitHub: solo se usa desde tu navegador para hablar directo con Google.</p>
+  <div class="privacy"><strong>Privacidad:</strong> las fotos se envían a la API de Google Gemini para leerlas. Son cuestionarios de menores con datos de salud: confirma con la persona responsable del estudio que está autorizado, y fotografía solo las hojas (sin nombres completos ni rostros).</div>
+</section>
+
+<section class="card">
+  <h2><span class="step">2</span> Fotos del participante</h2>
+  <div id="drop">Arrastra aquí las fotos de <strong>un participante</strong> (todas sus páginas) o haz clic para elegirlas
+    <input id="file" type="file" accept="image/*" multiple class="hidden">
+  </div>
+  <div class="thumbs" id="thumbs"></div>
+  <div class="actions">
+    <button class="primary" id="readBtn" disabled>Leer con IA</button>
+    <button id="manualBtn">Capturar a mano (sin IA)</button>
+  </div>
+  <div id="status"></div>
+</section>
+
+<section class="card hidden" id="reviewCard">
+  <h2><span class="step">3</span> Revisión</h2>
+  <div class="summary">
+    <span id="pendingPill" class="pill"></span>
+    <span class="note" style="margin:0">Lo amarillo no se leyó con claridad: compáralo con la foto. Nada se guarda hasta que presionas «Guardar participante».</span>
+  </div>
+  <div class="review">
+    <div class="viewer" id="viewer"><div class="tabs" id="viewerTabs"></div><img id="viewerImg" alt="Foto del cuestionario"></div>
+    <div>
+      <form id="form"></form>
+      <div class="actions">
+        <button class="primary" id="saveBtn" type="button">Guardar participante</button>
+        <button id="cancelBtn" type="button">Descartar</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2><span class="step">4</span> Participantes capturados <span id="count" class="pill ok">0</span></h2>
+  <div style="overflow:auto"><table id="table"><thead><tr><th>#</th><th>Iniciales</th><th>Edad</th><th>Sexo</th><th>Peso</th><th>Talla</th><th>Pendientes</th><th></th></tr></thead><tbody></tbody></table></div>
+  <div class="actions">
+    <button class="primary" id="copyBtn">Copiar filas para pegar en Excel</button>
+    <button id="csvBtn">Descargar CSV</button>
+    <button id="jsonBtn">Respaldo (JSON)</button>
+    <label style="display:inline-flex;align-items:center;gap:6px;margin:0;cursor:pointer;color:var(--ink)"><button type="button" id="importBtn">Restaurar respaldo</button><input id="importFile" type="file" accept=".json" class="hidden"></label>
+    <button class="danger" id="clearBtn">Borrar todo</button>
+  </div>
+  <p class="note">«Copiar filas» copia los datos sin encabezados: en el Excel, haz clic en la primera celda vacía de la columna A de «Respuestas de formulario 1» y pega (Ctrl+V). Las columnas quedan en el mismo orden que Google Forms (la columna IMC va vacía porque se calcula en el Excel). Los datos se guardan en este navegador; descarga un respaldo de vez en cuando.</p>
+</section>
+
+</main>
+<script>
+// ---------- Definición del cuestionario (mismo orden que Google Forms) ----------
 const HEADERS = ["Iniciales","Edad ","Sexo","¿Cuánto pesas?","¿Cuánto mides?","IMC","Nivel escolar","Promedio","Edad de tu mamá","Edad de tu papá","A continuación, verás una serie de 9 imágenes que representan distintas formas y tamaños de cuerpo\nElige el número de la silueta que más se parece a tu cuerpo actualmente.","Elige  el número de la silueta que representa cómo te gustaría verte.","  Me siento una persona tan valiosa como las otras  ","Generalmente me inclino a pensar que soy un fracaso ","  Creo que tengo algunas cualidades buenas","Soy capaz de hacer las cosas tan bien como los demás ","Creo que no tengo mucho de lo que estar orgulloso","Tengo una actitud positiva hacia mí mismo  ","En general me siento satisfecho conmigo mismo","Me gustaría tener más respeto por mí mismo","Realmente me siento inútil en algunas ocasiones ","Me interesan las cosas tanto como antes","Duermo bien","Me dan ganas de llorar","Me gusta salir con mis amigos","Me gustaría escapar, salir corriendo","Me duele la panza","Tengo mucha energía ","Disfruto la comida","Puedo defenderme por mí mismo (a)","Creo que no vale la pena vivir","Soy bueno (a) para las cosas que hago","Disfruto lo que hago tanto como lo hacía antes","Me gusta hablar con mi familia ","Tengo sueños horribles","Me siento muy solo (a)","Me animo fácilmente","Me siento tan triste que me cuesta trabajo soportarlo","Me siento muy aburrido","¿Te has sentido bien y en forma?","¿Te has sentido lleno/a de energía? ","¿Te has sentido triste? ","¿Te has sentido solo/a? ","¿Has tenido suficiente tiempo para ti? ","¿Has podido hacer las cosas que querías en tu tiempo libre? ","¿Tus padres te han tratado de forma justa? ","¿Te has divertido con tus amigos/as? ","¿Te ha ido bien en la escuela? ","¿Has podido poner atención? ","En general, ¿cómo dirías que es tu salud?"];
 
 const O = {
